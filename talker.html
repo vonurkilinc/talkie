@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta
+  name="viewport"
+  content="width=device-width, initial-scale=1, viewport-fit=cover"
+/>
+<title>Intercom Talker (PeerJS)</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:#0b0f14; --panel:#121822; --txt:#e8f0ff; --muted:#8ea0b5;
+    --accent:#35c759; --warn:#ff3b30; --btn:#ff5722; --btn2:#334155;
+  }
+  html, body { height:100%; margin:0; background: radial-gradient(1200px 900px at 30% -10%, #142031, var(--bg)); color:var(--txt); font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 22px; }
+  .card { background: linear-gradient(180deg,#0f1622,var(--panel)); border:1px solid #1f2a3a; border-radius:16px; padding:18px; box-shadow: 0 10px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.03); }
+  h1 { margin: 0 0 8px; font-weight: 700; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .pill { display:inline-flex; align-items:center; gap:10px; border-radius:999px; padding:10px 14px; background:#0e1520; border:1px solid #223047; color:var(--txt); }
+  .ok{color:var(--accent)} .bad{color:var(--warn)} .muted{color:var(--muted)}
+  .mono{font-family:ui-monospace, Menlo, Consolas, monospace;}
+  input[type=text], input[type=password] { background:#0b1220; color:var(--txt); border:1px solid #223047; border-radius:10px; padding:10px 12px; width:min(100%,420px); }
+  .btn { border:0; border-radius:14px; padding:14px 18px; font-weight:700; color:white; cursor:pointer; }
+  .btn-prim { background: var(--btn); box-shadow: 0 6px 20px rgba(255,87,34,.35); }
+  .btn-sec { background: var(--btn2); box-shadow: 0 6px 20px rgba(51,65,85,.35); }
+  #talkBtn { margin: 20px auto 8px; display:block; width:100%; max-width:520px; height:140px; font-size:2rem; border-radius:24px; touch-action: none; }
+  #talkBtn:active { filter: brightness(.95); }
+  .log { height:150px; overflow:auto; font-size:13px; line-height:1.35; padding:10px; border-radius:10px; background:#0d1420; border:1px solid #192233; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>🎙️ Intercom Talker <span class="muted">(PeerJS)</span></h1>
+
+    <div class="row" style="margin:10px 0 14px;">
+      <div class="pill"><b>Status:</b> <span id="status" class="muted">Loading…</span></div>
+      <div class="pill"><b>Mic:</b> <span id="micState" class="bad">Locked</span></div>
+    </div>
+
+    <div class="row" style="margin-bottom:10px;">
+      <label class="pill" style="gap:8px;">
+        <b>Receiver ID:</b>
+        <input id="receiverId" type="text" class="mono" placeholder="home-pc-12345" />
+      </label>
+    </div>
+
+    <div class="row" style="margin-bottom:10px;">
+      <label class="pill" style="gap:8px;">
+        <b>Secret (optional):</b>
+        <input id="secret" type="password" placeholder="(leave blank if not used)" />
+      </label>
+      <button id="saveCfg" class="btn btn-sec">Save</button>
+    </div>
+
+    <div class="row" style="margin-bottom:8px;">
+      <button id="enableMic" class="btn btn-sec">🎧 Enable Microphone</button>
+      <button id="testBeep" class="btn btn-sec">🔔 Test Beep</button>
+    </div>
+
+    <button id="talkBtn" class="btn btn-prim">Hold to Talk</button>
+    <div class="row" style="margin-bottom:12px;">
+      <small class="muted">Tip: press & hold to stream live. Release to stop.</small>
+    </div>
+
+    <div class="log mono" id="log"></div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<script>
+/* =========================
+   CONFIG — EDIT DEFAULTS
+========================= */
+// If you set a fixed ID on the PC listener (e.g., "home-pc-12345"),
+// put the same value as default here so you don’t have to type it each time.
+const DEFAULT_RECEIVER_ID = "home-pc-12345";  // ← change to match your PC page
+const DEFAULT_SECRET = "";                    // ← if your PC's SHARED_SECRET is set, put the same here
+
+// ICE servers help NAT traversal (keep Google STUN for reliability)
+const PEER_CONFIG = {
+  debug: 1,
+  config: {
+    iceServers: [
+      { urls: [ "stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302" ] }
+    ]
+  }
+};
+
+/* =========================
+   STATE
+========================= */
+const el = {
+  status: document.getElementById("status"),
+  micState: document.getElementById("micState"),
+  receiverId: document.getElementById("receiverId"),
+  secret: document.getElementById("secret"),
+  saveCfg: document.getElementById("saveCfg"),
+  enableMic: document.getElementById("enableMic"),
+  talkBtn: document.getElementById("talkBtn"),
+  testBeep: document.getElementById("testBeep"),
+  log: document.getElementById("log"),
+};
+
+let peer;
+let micStream = null;
+let currentCall = null;
+let audioCtx;
+
+/* =========================
+   UTILITIES
+========================= */
+function log(msg) {
+  const t = new Date().toLocaleTimeString();
+  el.log.innerText += `[${t}] ${msg}\n`;
+  el.log.scrollTop = el.log.scrollHeight;
+}
+function setStatus(text, cls) {
+  el.status.textContent = text;
+  el.status.className = cls || "muted";
+}
+function setMicState(text, ok) {
+  el.micState.textContent = text;
+  el.micState.className = ok ? "ok" : "bad";
+}
+function beep() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.frequency.value = 900;
+    g.gain.value = 0.0001;
+    o.connect(g).connect(audioCtx.destination);
+    const now = audioCtx.currentTime;
+    o.start();
+    g.gain.exponentialRampToValueAtTime(0.15, now + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+    o.stop(now + 0.2);
+  } catch {}
+}
+
+/* =========================
+   PEER INIT
+========================= */
+function initPeer() {
+  try {
+    setStatus("Connecting…", "muted");
+    peer = new Peer(undefined, PEER_CONFIG); // random ID for sender
+    peer.on("open", id => { setStatus("Online", "ok"); log("Peer open: " + id); });
+    peer.on("error", e => { setStatus("Error", "bad"); log("Peer error: " + (e.message || e.type)); });
+    peer.on("disconnected", () => { setStatus("Disconnected (reconnecting…)", "bad"); try{peer.reconnect();}catch{} });
+    peer.on("close", () => { setStatus("Closed", "bad"); });
+  } catch (e) {
+    setStatus("Init error", "bad");
+    log("Init error: " + e.message);
+  }
+}
+
+/* =========================
+   MIC / PERMISSIONS
+========================= */
+async function enableMic() {
+  try {
+    // Ask once; reuse stream for each talk press
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+    setMicState("Enabled", true);
+    log("Mic ready.");
+  } catch (e) {
+    setMicState("Denied", false);
+    log("Mic error: " + e.message);
+    alert("Microphone permission is required.");
+  }
+}
+
+/* =========================
+   TALK CONTROL
+========================= */
+function startTalking() {
+  if (!peer || peer.disconnected) {
+    log("Peer not ready yet."); setStatus("Not connected", "bad"); return;
+  }
+  if (!micStream) {
+    log("Mic not enabled."); setMicState("Locked", false); return;
+  }
+  const targetId = (el.receiverId.value || "").trim();
+  if (!targetId) { alert("Enter Receiver ID"); return; }
+
+  // If already talking, ignore
+  if (currentCall) return;
+
+  const secret = el.secret.value || "";
+  try {
+    currentCall = peer.call(targetId, micStream, { metadata: { secret } });
+    log("Calling " + targetId + "…");
+    setStatus("Talking… (hold)", "ok");
+    beep();
+    // We don't expect a remote stream back; the PC only receives.
+    currentCall.on("close", () => { currentCall = null; setStatus("Online", "ok"); log("Call ended."); });
+    currentCall.on("error", e => { log("Call error: " + e.message); currentCall = null; setStatus("Online", "ok"); });
+  } catch (e) {
+    log("Call failed: " + e.message);
+    setStatus("Online", "ok");
+  }
+}
+
+function stopTalking() {
+  if (currentCall) {
+    try { currentCall.close(); } catch {}
+    currentCall = null;
+    setStatus("Online", "ok");
+  }
+}
+
+/* =========================
+   UI WIRING
+========================= */
+el.receiverId.value = localStorage.getItem("receiverId") || DEFAULT_RECEIVER_ID;
+el.secret.value = localStorage.getItem("sharedSecret") || DEFAULT_SECRET;
+
+el.saveCfg.addEventListener("click", () => {
+  localStorage.setItem("receiverId", el.receiverId.value.trim());
+  localStorage.setItem("sharedSecret", el.secret.value);
+  log("Saved receiver ID / secret.");
+});
+
+el.enableMic.addEventListener("click", enableMic);
+el.testBeep.addEventListener("click", beep);
+
+// Press & hold behavior (works with touch and mouse)
+function pressStart(ev){ ev.preventDefault(); startTalking(); }
+function pressEnd(ev){ ev.preventDefault(); stopTalking(); }
+
+el.talkBtn.addEventListener("touchstart", pressStart, {passive:false});
+el.talkBtn.addEventListener("touchend", pressEnd, {passive:false});
+el.talkBtn.addEventListener("touchcancel", pressEnd, {passive:false});
+el.talkBtn.addEventListener("mousedown", pressStart);
+el.talkBtn.addEventListener("mouseup", pressEnd);
+el.talkBtn.addEventListener("mouseleave", pressEnd);
+
+/* =========================
+   BOOT
+========================= */
+window.addEventListener("load", () => {
+  initPeer();
+  // Optional: prevent screen from dimming while page is visible (if supported)
+  if ("wakeLock" in navigator) {
+    document.addEventListener("visibilitychange", async () => {
+      if (document.visibilityState === "visible") {
+        try { await navigator.wakeLock.request("screen"); } catch {}
+      }
+    });
+  }
+});
+</script>
+</body>
+</html>
